@@ -28,16 +28,18 @@ class BrowserAI:
 
     async def start(self):
         print("Iniciando browser...")
-        # Usando perfil padrão para tentar pegar o login existente
-        # Ajuste o caminho se necessário: ~/.config/google-chrome
-        user_data_dir = os.path.expanduser("~/.config/google-chrome-api-free")
+        # Usando um diretório de perfil persistente
+        user_data_dir = os.path.expanduser("~/Desktop/gemini_profile")
+        if not os.path.exists(user_data_dir):
+            os.makedirs(user_data_dir)
+            
         self.browser = await zd.start(
             user_data_dir=user_data_dir,
-            headless=False # Mantemos visível para o Bruno ver o que está acontecendo
+            headless=False
         )
         self.page = await self.browser.get(GEMINI_URL)
+        print("Browser aberto. Verifique se o login é necessário no monitor.")
         await asyncio.sleep(5)
-        print("Browser pronto.")
 
     async def ensure_pro_mode(self):
         """Garante que o modo Pro está selecionado"""
@@ -60,52 +62,72 @@ class BrowserAI:
 
     async def chat(self, prompt: str) -> str:
         async with self.lock:
-            if not self.page:
-                await self.start()
-            
-            await self.ensure_pro_mode()
+            try:
+                if not self.browser:
+                    await self.start()
+                
+                print(f"Processando prompt: {prompt[:50]}...")
+                
+                # Garante que estamos na página do Gemini
+                if "gemini.google.com" not in self.page.url:
+                    print("Navegando para o Gemini...")
+                    await self.page.get(GEMINI_URL)
+                    await asyncio.sleep(5)
 
-            # Localiza a caixa de texto
-            # O seletar do Gemini costuma ser um div contenteditable ou textarea
-            textarea = await self.page.query_selector('div[role="textbox"]') or \
-                       await self.page.query_selector('textarea')
-            
-            if not textarea:
-                raise Exception("Caixa de texto não encontrada")
+                # Localiza a caixa de texto
+                # Seletores comuns: 'div[role="textbox"]', 'textarea', '.input-area'
+                textarea = await self.page.select('div[role="textbox"]', timeout=10)
+                
+                if not textarea:
+                    print("Tentando seletor alternativo...")
+                    textarea = await self.page.select('textarea', timeout=5)
+                
+                if not textarea:
+                    raise Exception("Não encontrei a caixa de texto do Gemini. O site carregou?")
 
-            # Limpa e digita
-            await textarea.click()
-            await textarea.type(prompt)
-            await asyncio.sleep(1)
-            
-            # Clica em enviar
-            send_button = await self.page.query_selector('button[aria-label="Enviar comando"]') or \
-                          await self.page.query_selector('button:has(mat-icon:text("send"))')
-            
-            if send_button:
-                await send_button.click()
-            else:
-                # Fallback: Enter
-                await self.page.keyboard.press("Enter")
-
-            # Espera a resposta começar e terminar
-            # O Gemini mostra "O Gemini está digitando..." ou similar
-            print("Aguardando resposta...")
-            await asyncio.sleep(5) # Espera inicial
-            
-            # Tenta pegar o último bloco de conteúdo
-            last_response = ""
-            for _ in range(30): # Timeout de 60 segundos
-                responses = await self.page.query_selector_all('message-content')
-                if responses:
-                    current_text = await responses[-1].get_text()
-                    if current_text and current_text == last_response and len(current_text) > 0:
-                        # Se o texto parou de mudar, assumimos que terminou
-                        return current_text
-                    last_response = current_text
-                await asyncio.sleep(2)
-            
-            return last_response
+                # Digita o prompt
+                print("Digitando...")
+                await textarea.send_keys(prompt)
+                await asyncio.sleep(1)
+                
+                # Clica no botão de enviar
+                print("Tentando enviar...")
+                try:
+                    # Tenta encontrar o botão por vários seletores comuns
+                    send_button = await self.page.select('button[aria-label*="Enviar"]', timeout=3) or \
+                                  await self.page.select('button.send-button', timeout=1)
+                    if send_button:
+                        print("Clicando no botão enviar...")
+                        await send_button.click()
+                    else:
+                        print("Botão não encontrado pelo seletor, tentando Enter...")
+                        await textarea.send_keys('\n')
+                except Exception:
+                    print("Erro ao localizar botão, tentando Enter...")
+                    await textarea.send_keys('\n')
+                
+                print("Aguardando resposta...")
+                await asyncio.sleep(8) 
+                
+                last_text = ""
+                for i in range(20): # 60 segundos total
+                    elements = await self.page.select_all('message-content')
+                    if elements:
+                        # Pega o texto do último elemento de resposta
+                        current_text = elements[-1].text
+                        if current_text:
+                            if current_text == last_text and len(current_text) > 2:
+                                print("Resposta completa.")
+                                return current_text
+                            last_text = current_text
+                    await asyncio.sleep(3)
+                
+                return last_text or "O Gemini não respondeu a tempo."
+            except Exception as e:
+                import traceback
+                error_msg = f"Erro no BrowserAI: {str(e)}\n{traceback.format_exc()}"
+                print(error_msg)
+                raise Exception(error_msg)
 
 ai_browser = BrowserAI()
 
