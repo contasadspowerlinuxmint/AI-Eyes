@@ -1,4 +1,6 @@
-*.pyc
-__pycache__/
 venv/
+__pycache__/
+*.pyc
 .env
+debug_login.png
+gemini_profile/
